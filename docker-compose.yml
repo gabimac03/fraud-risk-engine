@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: risk_engine_cache
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes # Guarda los datos en el disco de forma asíncrona
+    volumes:
+      - redis_data:/data
+
+  mongodb:
+    image: mongo:7.0
+    container_name: risk_engine_db
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: fraud_pass123
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - fraud-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: risk_engine_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: fraud_secure_pass
+      POSTGRES_DB: risk_audit_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  mongodb_data:
+  postgres_data:
+
+networks:
+  fraud-network:
+    driver: bridge
