@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { RedisAdapter } from '../adapters/redis.adapter';
+import { RedisAdapter } from '../adapters/redis.adapter'; // Asegura la ruta correcta en tu árbol
 import { TransactionDto } from '../../transactions/dto/transaction.dto';
 
 export interface RiskVerdic {
@@ -13,7 +13,7 @@ export class RiskEngineService {
     constructor(private readonly redisAdapter: RedisAdapter) { }
 
     /**
-     * CAPA 1: CONTROL PERIMETRAL (NUEVO MÉTODO)
+     * CAPA 1: CONTROL PERIMETRAL
      * Agrega o remueve un elemento (IP, UserID, Tarjeta) de los Sets de Redis
      */
     async toggleList(type: 'blacklist' | 'whitelist', value: string, action: 'ADD' | 'REMOVE'): Promise<void> {
@@ -29,7 +29,7 @@ export class RiskEngineService {
 
     async evaluateRisk(transaction: TransactionDto): Promise<RiskVerdic> {
         const redis = this.redisAdapter.getClient();
-        const { userId, amount, cardNumberToken } = transaction;
+        const { userId, amount, cardNumberToken, deviceId } = transaction;
 
         // =========================================================================
         // CAPA 1: DEFENSA PERIMETRAL ULTRA-RÁPIDA (Sets de Redis)
@@ -58,10 +58,11 @@ export class RiskEngineService {
         }
 
         // =========================================================================
-        // CAPA 2: REGLAS DE NEGOCIO Y VELOCIDAD (Tu lógica original intacta)
+        // CAPA 2: REGLAS DE NEGOCIO Y VELOCIDAD
         // =========================================================================
         let riskScore = 0;
         const reasons: string[] = [];
+        let forceChallenge = false; // 💡 FLAG DE MITIGACIÓN: Fuerza la cuarentena preventiva sin llegar a banear
 
         // --- REGLA 1: VELOCITY ATTACK ---
         const velocityKey = `fraud:velocity:${userId}`;
@@ -85,12 +86,31 @@ export class RiskEngineService {
             reasons.push('High Amount: Monto excede el límite operativo estándar para validación directa.');
         }
 
-        // --- DECISIÓN FINAL ---
+        // --- REGLA 3: VELOCIDAD CRUZADA (NUEVA IMPLEMENTACIÓN CON 2FA FORZADO) ---
+        if (deviceId && cardNumberToken) {
+            const crossDeviceKey = `fraud:velocity:cross:device:${deviceId}`;
+            await redis.sadd(crossDeviceKey, cardNumberToken);
+            const uniqueCardsCount = await redis.scard(crossDeviceKey);
+
+            if (uniqueCardsCount === 1) {
+                await redis.expire(crossDeviceKey, 600); // 10 minutos de ventana
+            }
+
+            if (uniqueCardsCount > 2) {
+                // Mitigación Inteligente: Si usa más de 2 tarjetas, levantamos la flag de 2FA obligatorio
+                forceChallenge = true;
+                riskScore += 60;
+                reasons.push(`Cross-Velocity Trigger: Se detectó el uso de ${uniqueCardsCount} tarjetas distintas en este dispositivo. Desafío de identidad requerido.`);
+            }
+        }
+
+        // --- DECISIÓN FINAL CALIBRADA ---
         let decision: 'ALLOW' | 'CHALLENGE' | 'DENY' = 'ALLOW';
 
-        if (riskScore >= 80) {
+        // Si se activó la bandera de mitigación inteligente, evitamos el DENY directo y le damos la chance de validar identidad
+        if (riskScore >= 80 && !forceChallenge) {
             decision = 'DENY';
-        } else if (riskScore >= 40) {
+        } else if (riskScore >= 40 || forceChallenge) {
             decision = 'CHALLENGE';
         }
 
