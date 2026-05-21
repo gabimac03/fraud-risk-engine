@@ -70,4 +70,28 @@ export class TransactionsController {
             timestamp: new Date().toISOString(),
         };
     }
+
+    /**
+     * 🔐 ENDPOINT ADMINISTRATIVO: Control de Perímetro (Listas de Redis)
+     * Permite a un analista o sistema interno agregar/remover entidades del firewall dinámico
+     * POST /api/v1/transactions/admin/lists
+     */
+    @Post('admin/lists')
+    @HttpCode(HttpStatus.OK)
+    async manageLists(
+        @Body() body: { type: 'blacklist' | 'whitelist'; value: string; action: 'ADD' | 'REMOVE' }
+    ) {
+        // Validación básica de entrada para evitar payloads vacíos o erróneos
+        if (!body.type || !body.value || !body.action) {
+            throw new BadRequestException('Faltan parámetros obligatorios: type, value o action.');
+        }
+
+        await this.riskEngineService.toggleList(body.type, body.value, body.action);
+
+        return {
+            success: true,
+            message: `El valor '${body.value}' fue procesado con éxito en la '${body.type}' (Acción: ${body.action}).`,
+            timestamp: new Date().toISOString()
+        };
+    }
 }

@@ -12,10 +12,54 @@ export interface RiskVerdic {
 export class RiskEngineService {
     constructor(private readonly redisAdapter: RedisAdapter) { }
 
+    /**
+     * CAPA 1: CONTROL PERIMETRAL (NUEVO MÉTODO)
+     * Agrega o remueve un elemento (IP, UserID, Tarjeta) de los Sets de Redis
+     */
+    async toggleList(type: 'blacklist' | 'whitelist', value: string, action: 'ADD' | 'REMOVE'): Promise<void> {
+        const redis = this.redisAdapter.getClient();
+        const key = `fraud:${type}`;
+
+        if (action === 'ADD') {
+            await redis.sadd(key, value);
+        } else {
+            await redis.srem(key, value);
+        }
+    }
+
     async evaluateRisk(transaction: TransactionDto): Promise<RiskVerdic> {
         const redis = this.redisAdapter.getClient();
-        const { userId, amount } = transaction;
+        const { userId, amount, cardNumberToken } = transaction;
 
+        // =========================================================================
+        // CAPA 1: DEFENSA PERIMETRAL ULTRA-RÁPIDA (Sets de Redis)
+        // =========================================================================
+
+        // 1. Verificación de Lista Negra (Frenado fulminante en < 1ms)
+        const isBlacklistedUser = await redis.sismember('fraud:blacklist', userId);
+        const isBlacklistedCard = cardNumberToken ? await redis.sismember('fraud:blacklist', cardNumberToken) : false;
+
+        if (isBlacklistedUser || isBlacklistedCard) {
+            return {
+                decision: 'DENY',
+                riskScore: 100,
+                reasons: ['Bloqueo Perimetral: El usuario o la tarjeta de crédito se encuentran bloqueados en la Lista Negra.'],
+            };
+        }
+
+        // 2. Verificación de Lista Blanca (Fast-track para usuarios VIP)
+        const isWhitelistedUser = await redis.sismember('fraud:whitelist', userId);
+        if (isWhitelistedUser) {
+            return {
+                decision: 'ALLOW',
+                riskScore: 0,
+                reasons: ['Fast-Track: Usuario de confianza verificado en la Lista Blanca.'],
+            };
+        }
+
+        // =========================================================================
+        // CAPA 2: REGLAS DE NEGOCIO Y VELOCIDAD (Tu lógica original intacta)
+        // =========================================================================
         let riskScore = 0;
         const reasons: string[] = [];
 
@@ -41,6 +85,7 @@ export class RiskEngineService {
             reasons.push('High Amount: Monto excede el límite operativo estándar para validación directa.');
         }
 
+        // --- DECISIÓN FINAL ---
         let decision: 'ALLOW' | 'CHALLENGE' | 'DENY' = 'ALLOW';
 
         if (riskScore >= 80) {
@@ -56,16 +101,14 @@ export class RiskEngineService {
         };
     }
 
-    // 💡 AGREGAR ESTE MÉTODO (Si faltaba)
     async saveToQuarantine(transactionId: string): Promise<void> {
         const redis = this.redisAdapter.getClient();
         const quarantineKey = `fraud:quarantine:${transactionId}`;
 
         await redis.set(quarantineKey, 'PENDING');
-        await redis.expire(quarantineKey, 300); // 5 minutos de ventana
+        await redis.expire(quarantineKey, 300);
     }
 
-    // 💡 AGREGAR ESTE MÉTODO (Si faltaba)
     async verifyQuarantineChallenge(transactionId: string, code: string): Promise<{ success: boolean; message: string }> {
         const redis = this.redisAdapter.getClient();
         const quarantineKey = `fraud:quarantine:${transactionId}`;
