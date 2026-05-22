@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject } from '@nestjs/common';
+import { ClientProxy } from '@nestjs/microservices'; // 👨‍🍳 NUEVO: Para interactuar con RabbitMQ como Productor
 import { RedisAdapter } from '../adapters/redis.adapter'; // Asegura la ruta correcta en tu árbol
 import { TransactionDto } from '../../transactions/dto/transaction.dto';
+import * as crypto from 'crypto'; // 🔐 Módulo nativo de Node.js para hashing criptográfico SHA-256
 
 export interface RiskVerdic {
     decision: 'ALLOW' | 'CHALLENGE' | 'DENY';
@@ -10,7 +12,11 @@ export interface RiskVerdic {
 
 @Injectable()
 export class RiskEngineService {
-    constructor(private readonly redisAdapter: RedisAdapter) { }
+    // ⚙️ EDICIÓN: Inyectamos 'FRAUD_QUEUE_SERVICE' para despachar los tickets al fichero (RabbitMQ)
+    constructor(
+        private readonly redisAdapter: RedisAdapter,
+        @Inject('FRAUD_QUEUE_SERVICE') private readonly queueClient: ClientProxy,
+    ) { }
 
     /**
      * CAPA 1: CONTROL PERIMETRAL
@@ -29,7 +35,25 @@ export class RiskEngineService {
 
     async evaluateRisk(transaction: TransactionDto): Promise<RiskVerdic> {
         const redis = this.redisAdapter.getClient();
-        const { userId, amount, cardNumberToken, deviceId } = transaction;
+
+        // ⚙️ Extraemos los datos del DTO modificado
+        const { userId, amount, cardNumberToken, deviceId, deviceTelemetry } = transaction;
+
+        // =========================================================================
+        // 🔐 MOTOR DE FINGERPRINTING CRIPTOGRÁFICO
+        // =========================================================================
+
+        // Concatenamos las variables físicas estables del hardware de forma estructurada
+        const rawTelemetryString = `${deviceTelemetry.canvasFingerprint}|${deviceTelemetry.hardwareConcurrency}|${deviceTelemetry.deviceMemory}`;
+
+        // Generamos el HASH SHA-256 inmutable. Esto es el "True Device ID"
+        const trueDeviceId = crypto.createHash('sha256').update(rawTelemetryString).digest('hex');
+
+        // 🖥️ LOGS DE DIAGNÓSTICO CALIBRADOS:
+        console.log("=================================================================");
+        console.log("1. STRING CRUDO GENERADO EN NODE:", `"${rawTelemetryString}"`);
+        console.log("2. TRUE DEVICE ID CALCULADO POR TU APPS (SHA-256):", trueDeviceId);
+        console.log("=================================================================");
 
         // =========================================================================
         // CAPA 1: DEFENSA PERIMETRAL ULTRA-RÁPIDA (Sets de Redis)
@@ -39,22 +63,45 @@ export class RiskEngineService {
         const isBlacklistedUser = await redis.sismember('fraud:blacklist', userId);
         const isBlacklistedCard = cardNumberToken ? await redis.sismember('fraud:blacklist', cardNumberToken) : false;
 
-        if (isBlacklistedUser || isBlacklistedCard) {
-            return {
+        // 💡 SEGURIDAD EXTRA: También verificamos si el hardware real (True Device ID) está en lista negra
+        const isBlacklistedHardware = await redis.sismember('fraud:blacklist', trueDeviceId);
+
+        if (isBlacklistedUser || isBlacklistedCard || isBlacklistedHardware) {
+            const blockVerdict: RiskVerdic = {
                 decision: 'DENY',
                 riskScore: 100,
-                reasons: ['Bloqueo Perimetral: El usuario o la tarjeta de crédito se encuentran bloqueados en la Lista Negra.'],
+                reasons: ['Bloqueo Perimetral: El usuario, la tarjeta o el hardware del dispositivo se encuentran bloqueados.'],
             };
+
+            // 🚀 ENVÍO ASINCRÓNICO: Notificamos el bloqueo a la cocina de eventos de forma inmediata (No usa await)
+            this.queueClient.emit('transaction_evaluated', {
+                transactionId: `PERIMETRAL-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                transaction,
+                verdict: blockVerdict,
+                timestamp: new Date().toISOString()
+            });
+
+            return blockVerdict;
         }
 
         // 2. Verificación de Lista Blanca (Fast-track para usuarios VIP)
         const isWhitelistedUser = await redis.sismember('fraud:whitelist', userId);
         if (isWhitelistedUser) {
-            return {
+            const vipVerdict: RiskVerdic = {
                 decision: 'ALLOW',
                 riskScore: 0,
                 reasons: ['Fast-Track: Usuario de confianza verificado en la Lista Blanca.'],
             };
+
+            // 🚀 ENVÍO ASINCRÓNICO: Registramos el evento VIP sin bloquear el hilo principal
+            this.queueClient.emit('transaction_evaluated', {
+                transactionId: `VIP-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                transaction,
+                verdict: vipVerdict,
+                timestamp: new Date().toISOString()
+            });
+
+            return vipVerdict;
         }
 
         // =========================================================================
@@ -62,22 +109,46 @@ export class RiskEngineService {
         // =========================================================================
         let riskScore = 0;
         const reasons: string[] = [];
-        let forceChallenge = false; // 💡 FLAG DE MITIGACIÓN: Fuerza la cuarentena preventiva sin llegar a banear
+        let forceChallenge = false; // FLAG DE MITIGACIÓN: Fuerza la cuarentena preventiva sin llegar a banear
 
-        // --- REGLA 1: VELOCITY ATTACK ---
-        const velocityKey = `fraud:velocity:${userId}`;
-        const currentTxCount = await redis.incr(velocityKey);
-
-        if (currentTxCount === 1) {
-            await redis.expire(velocityKey, 10);
+        // 🛡️ REGLA ANTISPOOFING: Detecta si alteraron el deviceId visible pero mantienen el mismo hardware
+        if (deviceId !== trueDeviceId) {
+            riskScore += 30;
+            reasons.push('Spoofing Detection: El identificador del dispositivo fue alterado o no coincide con la telemetría de hardware.');
         }
+
+        // --- 🚀 REGLA 1: SLIDING WINDOW RATE LIMITING (Sorted Sets) ---
+        const now = Date.now();
+        const windowSizeMs = 10000; // Ventana de tiempo móvil de 10 segundos
+        const slidingVelocityKey = `fraud:velocity:sliding:${userId}`;
+
+        // Abrimos un pipeline (multi) para enviar múltiples comandos a Redis de forma síncrona en un solo viaje de red
+        const pipeline = redis.multi();
+
+        // 1. Removemos del set ordenado todos los registros cuyo timestamp sea anterior a (ahora - 10 segundos)
+        pipeline.zremrangebyscore(slidingVelocityKey, 0, now - windowSizeMs);
+
+        // 2. Insertamos el intento actual en el set usando el timestamp actual como score y como valor identificador
+        pipeline.zadd(slidingVelocityKey, now, now.toString());
+
+        // 3. Contamos cuántos registros válidos quedan dentro del set en este preciso instante
+        pipeline.zcard(slidingVelocityKey);
+
+        // 4. Renovamos el TTL de la estructura completa para evitar fugas de memoria (limpieza pasiva)
+        pipeline.expire(slidingVelocityKey, 15);
+
+        // Ejecutamos el pipeline de forma atómica en Redis
+        const pipelineResults = await pipeline.exec();
+
+        // Evaluamos el conteo que devolvió el comando 'zcard' (ubicado en el índice 2 del array de respuestas)
+        const currentTxCount = pipelineResults && pipelineResults[2] ? (pipelineResults[2][1] as number) : 1;
 
         if (currentTxCount > 5) {
             riskScore += 80;
-            reasons.push('Velocity Alert: Demasiadas transacciones en menos de 10 segundos (Posible Bot/Carding).');
+            reasons.push(`Sliding Velocity Alert: Se detectaron ${currentTxCount} transacciones en una ventana móvil de 10 segundos (Posible Bot/Carding).`);
         } else if (currentTxCount > 3) {
             riskScore += 40;
-            reasons.push('Velocity Warning: Actividad inusualmente alta de transacciones.');
+            reasons.push(`Sliding Velocity Warning: Actividad inusualmente alta de transacciones (${currentTxCount}) en tiempo real.`);
         }
 
         // --- REGLA 2: CONTROL DE MONTOS ---
@@ -86,9 +157,9 @@ export class RiskEngineService {
             reasons.push('High Amount: Monto excede el límite operativo estándar para validación directa.');
         }
 
-        // --- REGLA 3: VELOCIDAD CRUZADA (NUEVA IMPLEMENTACIÓN CON 2FA FORZADO) ---
-        if (deviceId && cardNumberToken) {
-            const crossDeviceKey = `fraud:velocity:cross:device:${deviceId}`;
+        // --- REGLA 3: VELOCIDAD CRUZADA (CALIBRADA CON TRUE DEVICE ID CRIPTOGRÁFICO) ---
+        if (trueDeviceId && cardNumberToken) {
+            const crossDeviceKey = `fraud:velocity:cross:device:${trueDeviceId}`;
             await redis.sadd(crossDeviceKey, cardNumberToken);
             const uniqueCardsCount = await redis.scard(crossDeviceKey);
 
@@ -97,28 +168,40 @@ export class RiskEngineService {
             }
 
             if (uniqueCardsCount > 2) {
-                // Mitigación Inteligente: Si usa más de 2 tarjetas, levantamos la flag de 2FA obligatorio
                 forceChallenge = true;
                 riskScore += 60;
-                reasons.push(`Cross-Velocity Trigger: Se detectó el uso de ${uniqueCardsCount} tarjetas distintas en este dispositivo. Desafío de identidad requerido.`);
+                reasons.push(`Cross-Velocity Trigger: Se detectó el uso de ${uniqueCardsCount} tarjetas distintas en este hardware. Desafío de identidad requerido.`);
             }
         }
 
         // --- DECISIÓN FINAL CALIBRADA ---
         let decision: 'ALLOW' | 'CHALLENGE' | 'DENY' = 'ALLOW';
 
-        // Si se activó la bandera de mitigación inteligente, evitamos el DENY directo y le damos la chance de validar identidad
         if (riskScore >= 80 && !forceChallenge) {
             decision = 'DENY';
         } else if (riskScore >= 40 || forceChallenge) {
             decision = 'CHALLENGE';
         }
 
-        return {
+        const finalVerdict: RiskVerdic = {
             decision,
             riskScore: Math.min(riskScore, 100),
             reasons,
         };
+
+        // =========================================================================
+        // 🚀 EL PINCHAZO EN EL FICHERO (Despacho a RabbitMQ)
+        // =========================================================================
+        // Publicamos el evento de análisis completo. Tardará < 0.5ms en impactar la cola.
+        // NO usamos 'await' porque no nos interesa retrasar la respuesta HTTP del cliente por esto.
+        this.queueClient.emit('transaction_evaluated', {
+            transactionId: `TX-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
+            transaction,
+            verdict: finalVerdict,
+            timestamp: new Date().toISOString()
+        });
+
+        return finalVerdict;
     }
 
     async saveToQuarantine(transactionId: string): Promise<void> {

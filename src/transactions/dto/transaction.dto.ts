@@ -13,6 +13,25 @@ class LocationDto {
     city!: string;
 }
 
+// 💻 NUEVO: Sub-objeto para recolectar la telemetría cruda del hardware del cliente
+class DeviceTelemetryDto {
+    @IsString()
+    @IsNotEmpty()
+    canvasFingerprint!: string; // Hash único del renderizado de la GPU
+
+    @IsNumber()
+    @IsPositive()
+    hardwareConcurrency!: number; // Cantidad de núcleos de CPU (ej. 4, 8, 16)
+
+    @IsNumber()
+    @IsPositive()
+    deviceMemory!: number; // RAM aproximada reportada por el navegador en GB (ej. 4, 8, 16)
+
+    @IsString()
+    @IsNotEmpty()
+    userAgent!: string; // El string identificador del navegador y Sistema Operativo
+}
+
 // 2. El contrato principal de la transacción
 export class TransactionDto {
     @IsUUID('4') // Forzamos a que el ID de usuario sea un UUID v4 válido
@@ -35,7 +54,13 @@ export class TransactionDto {
 
     @IsString()
     @IsNotEmpty()
-    deviceId!: string; // Huella digital del dispositivo del usuario (Device Fingerprint)
+    deviceId!: string; // ID asignado/previo (ahora lo validaremos contra la telemetría)
+
+    // ⚙️ EDICIÓN: Agregamos el objeto de telemetría obligatoria de hardware
+    @IsObject()
+    @ValidateNested()
+    @Type(() => DeviceTelemetryDto)
+    deviceTelemetry!: DeviceTelemetryDto;
 
     @IsObject()
     @ValidateNested() // Le dice a class-validator que valide las reglas internas de LocationDto
