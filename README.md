@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./resources/Diagrama-Fraud-Risk.png" alt="Arquitectura del Motor de Riesgo" width="800">
+  <img src="./recursos/Diagrama-Fraud-Risk.png" alt="Arquitectura del Motor de Riesgo" width="800">
 </p>
 
 ### 1. Cryptographic Hardware Fingerprinting & Anti-Spoofing
