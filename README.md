@@ -1,5 +1,6 @@
-![Arquitectura]("C:\Users\Admin\Downloads\Diagrama en blanco (1).png")
-                                        └───────────────────────────┘
+<p align="center">
+  <img src="./resources/Diagrama-Fraud-Risk.png" alt="Arquitectura del Motor de Riesgo" width="800">
+</p>
 
 ### 1. Cryptographic Hardware Fingerprinting & Anti-Spoofing
 * **True Device ID Generation:** Instead of relying on client-side, easily mutable `deviceId` strings, the system extracts core immutable hardware properties (`canvasFingerprint`, `hardwareConcurrency`, `deviceMemory`).
