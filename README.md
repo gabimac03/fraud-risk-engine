@@ -1,34 +1,4 @@
-              ┌─────────────────────────────────────────┐
-              │          Postman / Client Gateway       │
-              └────────────────────┬────────────────────┘
-                                   │
-                    HTTP POST /transactions (< 2ms)
-                                   ▼
-              ┌─────────────────────────────────────────┐
-              │       NestJS Hybrid Risk Engine         │
-              └───────┬─────────────────────────┬───────┘
-                      │                         │
-        In-Memory Read/Write             Emit Event (Async)
-                      ▼                         ▼
-        ┌───────────────────────────┐   ┌───────────────────────────┐
-        │       Redis Cluster       │   │     RabbitMQ Broker       │
-        │                           │   │                           │
-        │  - Cryptographic Sets     │   │   Queue:                  │
-        │  - Sliding Window Sets    │   │   'fraud_audit_logs'      │
-        │  - Cross-Velocity Check   │   └───────────────┬───────────┘
-        └───────────────────────────┘                   │
-                                                  Consume Ticket
-                                                        ▼
-                                        ┌───────────────────────────┐
-                                        │    FraudLogConsumer       │
-                                        │  (Background Worker Process)│
-                                        └───────────────┬───────────┘
-                                                        │
-                                                 Deferred Storage
-                                                        ▼
-                                        ┌───────────────────────────┐
-                                        │     MongoDB Persistent    │
-                                        │     (Audit Database)      │
+![Arquitectura]("C:\Users\Admin\Downloads\Diagrama en blanco (1).png")
                                         └───────────────────────────┘
 
 ### 1. Cryptographic Hardware Fingerprinting & Anti-Spoofing
